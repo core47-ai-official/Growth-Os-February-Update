@@ -7,13 +7,16 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Calendar, Clock, Video, User, Link as LinkIcon, Plus, Edit, Trash2, BookOpen, Users2 } from 'lucide-react';
+import { Calendar as CalendarIcon, CalendarDays, Clock, Video, User, Link as LinkIcon, Plus, Edit, Trash2, BookOpen, Users2, Search } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { safeQuery } from '@/lib/database-safety';
 import type { SuccessSessionResult } from '@/types/database';
-import { format } from 'date-fns';
+import { format, startOfWeek, endOfWeek, isWithinInterval, isSameDay } from 'date-fns';
 import { notifyMentorOfSuccessSessionScheduled } from '@/lib/notification-service';
+import { AlertTriangle } from 'lucide-react';
+import { Calendar } from '@/components/ui/calendar';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 interface SuccessSession {
   id: string;
@@ -82,6 +85,13 @@ export function SuccessSessionsManagement() {
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingSession, setEditingSession] = useState<SuccessSession | null>(null);
+  // Filter state
+  const [filterSearch, setFilterSearch] = useState('');
+  const [filterHost, setFilterHost] = useState('__all__');
+  const [filterCourse, setFilterCourse] = useState('__all__');
+  const [filterBatch, setFilterBatch] = useState('__all__');
+  const [filterStatus, setFilterStatus] = useState('__all__');
+  const [filterDate, setFilterDate] = useState<Date | undefined>(undefined);
   const [formData, setFormData] = useState<SessionFormData>({
     title: '',
     description: '',
@@ -96,7 +106,7 @@ export function SuccessSessionsManagement() {
     host_login_email: '',
     host_login_pwd: '',
     status: 'upcoming',
-    course_id: '',
+    course_id: '__all__',
     batch_id: ''
   });
   const { toast } = useToast();
@@ -153,7 +163,6 @@ export function SuccessSessionsManagement() {
       const { data, error } = await supabase
         .from('courses')
         .select('id, title')
-        .eq('is_active', true)
         .order('title', { ascending: true });
 
       if (error) throw error;
@@ -168,7 +177,6 @@ export function SuccessSessionsManagement() {
       const { data, error } = await supabase
         .from('batches')
         .select('id, name, course_id, status')
-        .eq('status', 'active')
         .order('name', { ascending: true });
 
       if (error) throw error;
@@ -180,11 +188,11 @@ export function SuccessSessionsManagement() {
 
   // Filter batches when course_id changes
   useEffect(() => {
-    if (formData.course_id) {
+    if (formData.course_id && formData.course_id !== '__all__') {
       const matching = batches.filter(b => b.course_id === formData.course_id);
       setFilteredBatches(matching);
     } else {
-      setFilteredBatches([]);
+      setFilteredBatches(batches);
     }
   }, [formData.course_id, batches]);
 
@@ -240,7 +248,7 @@ export function SuccessSessionsManagement() {
       host_login_email: '',
       host_login_pwd: '',
       status: 'upcoming',
-      course_id: '',
+      course_id: '__all__',
       batch_id: ''
     });
     setEditingSession(null);
@@ -263,7 +271,7 @@ export function SuccessSessionsManagement() {
         host_login_email: session.host_login_email || '',
         host_login_pwd: session.host_login_pwd || '',
         status: session.status || 'upcoming',
-        course_id: session.course_id || '',
+        course_id: session.course_id || '__all__',
         batch_id: session.batch_id || ''
       });
     } else {
@@ -304,7 +312,7 @@ export function SuccessSessionsManagement() {
         host_login_email: formData.host_login_email,
         host_login_pwd: formData.host_login_pwd,
         status: formData.status,
-        course_id: formData.course_id || null,
+        course_id: formData.course_id === '__all__' ? null : (formData.course_id || null),
         batch_id: formData.batch_id === '' || formData.batch_id === 'unbatched' ? null : formData.batch_id
       };
 
@@ -349,10 +357,37 @@ export function SuccessSessionsManagement() {
           }
         }
 
-        toast({
-          title: "Success",
-          description: "Session created successfully",
-        });
+        // Notify batch students via email + in-app notifications
+        if (sessionData.batch_id && newSession) {
+          try {
+            await supabase.functions.invoke('send-batch-content-notification', {
+              body: {
+                batch_id: sessionData.batch_id,
+                item_type: 'LIVE_SESSION',
+                item_id: newSession.id,
+                title: sessionData.title,
+                description: sessionData.description,
+                meeting_link: sessionData.link,
+                start_datetime: sessionData.start_time
+              }
+            });
+            toast({
+              title: "Success",
+              description: "Session created and students notified successfully",
+            });
+          } catch (notifyError) {
+            console.error('Failed to notify batch students:', notifyError);
+            toast({
+              title: "Success",
+              description: "Session created, but student notifications may have failed",
+            });
+          }
+        } else {
+          toast({
+            title: "Success",
+            description: "Session created successfully",
+          });
+        }
       }
 
       fetchSessions();
@@ -595,7 +630,7 @@ export function SuccessSessionsManagement() {
                       <SelectValue placeholder="All students (no filter)" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">All students (no filter)</SelectItem>
+                      <SelectItem value="__all__">All students (no filter)</SelectItem>
                       {courses.map((course) => (
                         <SelectItem key={course.id} value={course.id}>
                           {course.title}
@@ -612,10 +647,9 @@ export function SuccessSessionsManagement() {
                   <Select
                     value={formData.batch_id}
                     onValueChange={(value) => setFormData({ ...formData, batch_id: value })}
-                    disabled={!formData.course_id}
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder={formData.course_id ? 'Select batch' : 'Select course first'} />
+                      <SelectValue placeholder="Select batch" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="unbatched">Unbatched students</SelectItem>
@@ -642,21 +676,135 @@ export function SuccessSessionsManagement() {
         </Dialog>
       </div>
 
+      {/* This Week's Sessions */}
+      <ThisWeekSessions
+        sessions={sessions}
+        courses={courses}
+        batches={batches}
+        onEdit={handleOpenDialog}
+      />
+
       <Card className="shadow-lg border-0 bg-gradient-to-br from-white to-gray-50 animate-fade-in">
-        <CardHeader className="bg-gradient-to-r from-orange-50 to-red-50 border-b">
+        <CardHeader className="bg-gradient-to-r from-orange-50 to-red-50 border-b space-y-3">
           <CardTitle className="flex items-center text-xl">
             <Video className="w-6 h-6 mr-3 text-orange-600" />
             All Success Sessions
           </CardTitle>
+
+          {/* Filter Row */}
+          <div className="flex flex-wrap gap-2 items-end">
+            <div className="relative flex-1 min-w-[180px] max-w-[260px]">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search by title..."
+                value={filterSearch}
+                onChange={e => setFilterSearch(e.target.value)}
+                className="pl-8 h-9 text-sm"
+              />
+            </div>
+            <Select value={filterHost} onValueChange={setFilterHost}>
+              <SelectTrigger className="w-[160px] h-9 text-sm">
+                <SelectValue placeholder="All Hosts" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All Hosts</SelectItem>
+                {users.map(u => (
+                  <SelectItem key={u.id} value={u.id}>{u.full_name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={filterCourse} onValueChange={v => { setFilterCourse(v); setFilterBatch('__all__'); }}>
+              <SelectTrigger className="w-[160px] h-9 text-sm">
+                <SelectValue placeholder="All Courses" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All Courses</SelectItem>
+                {courses.map(c => (
+                  <SelectItem key={c.id} value={c.id}>{c.title}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={filterBatch} onValueChange={setFilterBatch}>
+              <SelectTrigger className="w-[150px] h-9 text-sm">
+                <SelectValue placeholder="All Batches" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All Batches</SelectItem>
+                {(filterCourse !== '__all__' ? batches.filter(b => b.course_id === filterCourse) : batches).map(b => (
+                  <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={filterStatus} onValueChange={setFilterStatus}>
+              <SelectTrigger className="w-[140px] h-9 text-sm">
+                <SelectValue placeholder="All Statuses" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All Statuses</SelectItem>
+                <SelectItem value="upcoming">Upcoming</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="cancelled">Cancelled</SelectItem>
+              </SelectContent>
+            </Select>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant="outline" size="sm" className="h-9 text-sm gap-1.5">
+                  <CalendarIcon className="w-3.5 h-3.5" />
+                  {filterDate ? format(filterDate, 'MMM d, yyyy') : 'Pick date'}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start">
+                <Calendar
+                  mode="single"
+                  selected={filterDate}
+                  onSelect={setFilterDate}
+                  className="pointer-events-auto"
+                />
+              </PopoverContent>
+            </Popover>
+            {(filterSearch || filterHost !== '__all__' || filterCourse !== '__all__' || filterBatch !== '__all__' || filterStatus !== '__all__' || filterDate) && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-9 text-xs"
+                onClick={() => {
+                  setFilterSearch('');
+                  setFilterHost('__all__');
+                  setFilterCourse('__all__');
+                  setFilterBatch('__all__');
+                  setFilterStatus('__all__');
+                  setFilterDate(undefined);
+                }}
+              >
+                Clear Filters
+              </Button>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="p-0">
-          {sessions.length === 0 ? (
-            <div className="text-center py-16 animate-fade-in">
-              <Video className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
-              <h3 className="text-lg font-semibold text-muted-foreground mb-2">No sessions found</h3>
-              <p className="text-muted-foreground">Schedule your first success session to get started</p>
-            </div>
-          ) : (
+          {(() => {
+            const filtered = sessions.filter(s => {
+              if (filterSearch && !s.title.toLowerCase().includes(filterSearch.toLowerCase())) return false;
+              if (filterHost !== '__all__' && s.mentor_id !== filterHost) return false;
+              if (filterCourse !== '__all__' && s.course_id !== filterCourse) return false;
+              if (filterBatch !== '__all__' && s.batch_id !== filterBatch) return false;
+              if (filterStatus !== '__all__' && s.status !== filterStatus) return false;
+              if (filterDate) {
+                try {
+                  const sessionDate = new Date(s.schedule_date || s.start_time);
+                  if (!isSameDay(sessionDate, filterDate)) return false;
+                } catch { return false; }
+              }
+              return true;
+            });
+            if (filtered.length === 0) return (
+              <div className="text-center py-16 animate-fade-in">
+                <Video className="w-16 h-16 text-muted-foreground mx-auto mb-4" />
+                <h3 className="text-lg font-semibold text-muted-foreground mb-2">No sessions found</h3>
+                <p className="text-muted-foreground">{sessions.length > 0 ? 'Try adjusting your filters' : 'Schedule your first success session to get started'}</p>
+              </div>
+            );
+            return (
             <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
@@ -672,7 +820,7 @@ export function SuccessSessionsManagement() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {sessions.map((session, index) => (
+                  {filtered.map((session, index) => (
                     <TableRow 
                       key={session.id} 
                       className="hover:bg-gray-50 transition-colors animate-fade-in"
@@ -697,20 +845,18 @@ export function SuccessSessionsManagement() {
                       <TableCell className="min-w-[120px]">
                         <div className="flex flex-col gap-1">
                           <span className="truncate text-sm font-medium">
-                            {courses.find(c => c.id === session.course_id)?.title || '—'}
+                            {courses.find(c => c.id === session.course_id)?.title || 'All Courses'}
                           </span>
-                          {session.course_id && (
-                            <Badge variant="outline" className="text-xs w-fit">
-                              {session.batch_id
-                                ? batches.find(b => b.id === session.batch_id)?.name || 'Batch'
-                                : 'Unbatched'}
-                            </Badge>
-                          )}
+                          <Badge variant="outline" className="text-xs w-fit">
+                            {session.batch_id
+                              ? batches.find(b => b.id === session.batch_id)?.name || 'Unknown Batch'
+                              : 'All Batches'}
+                          </Badge>
                         </div>
                       </TableCell>
                       <TableCell className="min-w-[120px]">
                         <div className="flex items-center">
-                          <Calendar className="w-4 h-4 mr-2 text-muted-foreground flex-shrink-0" />
+                          <CalendarIcon className="w-4 h-4 mr-2 text-muted-foreground flex-shrink-0" />
                           <span className="whitespace-nowrap">{formatDate(session.schedule_date)}</span>
                         </div>
                       </TableCell>
@@ -783,9 +929,96 @@ export function SuccessSessionsManagement() {
                 </TableBody>
               </Table>
             </div>
-          )}
+            );
+          })()}
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+interface ThisWeekSessionsProps {
+  sessions: SuccessSession[];
+  courses: Course[];
+  batches: Batch[];
+  onEdit: (session: SuccessSession) => void;
+}
+
+function ThisWeekSessions({ sessions, courses, batches, onEdit }: ThisWeekSessionsProps) {
+  const now = new Date();
+  const weekStart = startOfWeek(now, { weekStartsOn: 1 });
+  const weekEnd = endOfWeek(now, { weekStartsOn: 1 });
+
+  const thisWeekSessions = sessions.filter(s => {
+    if (!s.schedule_date) return false;
+    try {
+      const sessionDate = new Date(s.schedule_date);
+      return isWithinInterval(sessionDate, { start: weekStart, end: weekEnd });
+    } catch {
+      return false;
+    }
+  });
+
+  if (thisWeekSessions.length === 0) return null;
+
+  const needsAttention = (session: SuccessSession) => {
+    return !session.zoom_meeting_id || !session.zoom_passcode || session.link === 'TBD' || !session.link;
+  };
+
+  return (
+    <Card className="shadow-lg border-0 bg-gradient-to-br from-amber-50 to-orange-50 animate-fade-in">
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center text-lg">
+          <CalendarDays className="w-5 h-5 mr-2 text-amber-600" />
+          This Week's Live Sessions
+          <Badge variant="secondary" className="ml-2">{thisWeekSessions.length}</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <div className="space-y-2">
+          {thisWeekSessions.map(session => {
+            const missing = needsAttention(session);
+            const courseName = courses.find(c => c.id === session.course_id)?.title;
+            const batchName = session.batch_id ? batches.find(b => b.id === session.batch_id)?.name : null;
+
+            return (
+              <div
+                key={session.id}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border cursor-pointer transition-colors hover:bg-background/80 ${
+                  missing ? 'border-amber-300 bg-amber-50/50' : 'border-green-300 bg-green-50/50'
+                }`}
+                onClick={() => onEdit(session)}
+              >
+                {missing ? (
+                  <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+                ) : (
+                  <Video className="w-4 h-4 text-green-500 shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium truncate">{session.title}</div>
+                  <div className="text-xs text-muted-foreground flex items-center gap-2">
+                    {session.schedule_date && <span>{format(new Date(session.schedule_date), 'EEE, MMM d')}</span>}
+                    {session.start_time && <span>• {format(new Date(session.start_time), 'h:mm a')}</span>}
+                    {courseName && <span>• {courseName}</span>}
+                    {batchName && <span>• {batchName}</span>}
+                  </div>
+                </div>
+                {missing && (
+                  <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-700 shrink-0">
+                    Needs Zoom Details
+                  </Badge>
+                )}
+                {session.mentor_name && (
+                  <span className="text-xs text-muted-foreground shrink-0 flex items-center gap-1">
+                    <User className="w-3 h-3" />
+                    {session.mentor_name}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
