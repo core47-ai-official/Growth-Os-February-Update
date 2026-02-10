@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -8,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Plus, Edit, Trash2, Users, Calendar, Clock, Settings, AlertTriangle, BookOpen, Route, UserPlus, X } from 'lucide-react';
+import { Plus, Edit, Trash2, Users, Calendar, Clock, AlertTriangle, BookOpen, Route, UserPlus, X } from 'lucide-react';
 import { BatchStudentAssignment } from './BatchStudentAssignment';
 import { useBatches, type Batch, type BatchFormData } from '@/hooks/useBatches';
 import { supabase } from '@/integrations/supabase/client';
@@ -32,6 +33,7 @@ interface BatchAssociations {
 
 export function BatchManagement() {
   const { batches, loading, createBatch, updateBatch, deleteBatch, canEditStartDate, fetchBatches } = useBatches();
+  const navigate = useNavigate();
   const [courses, setCourses] = useState<Course[]>([]);
   const [pathways, setPathways] = useState<Pathway[]>([]);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -579,14 +581,6 @@ export function BatchManagement() {
                           title="Manage Students"
                         >
                           <UserPlus className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => window.location.href = `/admin/batches/${batch.id}/timeline`}
-                          title="Manage Timeline"
-                        >
-                          <Settings className="w-4 h-4" />
                         </Button>
                         <Button
                           variant="ghost"
