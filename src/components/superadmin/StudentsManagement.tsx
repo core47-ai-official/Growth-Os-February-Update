@@ -23,6 +23,7 @@ import { useInstallmentOptions } from '@/hooks/useInstallmentOptions';
 import { useUserManagement } from '@/hooks/useUserManagement';
 import { useAuth } from '@/hooks/useAuth';
 import { formatCurrency } from '@/utils/currencyFormatter';
+import { cn } from '@/lib/utils';
 import jsPDF from 'jspdf';
 interface Student {
   id: string;
@@ -88,6 +89,10 @@ export function StudentsManagement() {
   const [lmsStatusFilter, setLmsStatusFilter] = useState('all');
   const [feesStructureFilter, setFeesStructureFilter] = useState('all');
   const [invoiceFilter, setInvoiceFilter] = useState('all');
+  const [totalFeeSort, setTotalFeeSort] = useState('none');
+  const [feeRangeFrom, setFeeRangeFrom] = useState('');
+  const [feeRangeTo, setFeeRangeTo] = useState('');
+  const [joinDateRange, setJoinDateRange] = useState<{ from?: Date; to?: Date }>({});
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [activityLogsDialog, setActivityLogsDialog] = useState(false);
@@ -113,6 +118,17 @@ export function StudentsManagement() {
     enrollment_id: '' as string | null
   });
   const [editBatches, setEditBatches] = useState<{id: string; name: string; start_date: string}[]>([]);
+  const [bulkBatchDialogOpen, setBulkBatchDialogOpen] = useState(false);
+  const [bulkBatchId, setBulkBatchId] = useState<string>('none');
+  const [bulkBatches, setBulkBatches] = useState<{id: string; name: string; start_date: string}[]>([]);
+  const [bulkBatchLoading, setBulkBatchLoading] = useState(false);
+  const [bulkAccessDialogOpen, setBulkAccessDialogOpen] = useState(false);
+  const [bulkAccessAction, setBulkAccessAction] = useState<'grant' | 'revoke'>('grant');
+  const [bulkAccessCourses, setBulkAccessCourses] = useState<{id: string; title: string}[]>([]);
+  const [bulkAccessPathways, setBulkAccessPathways] = useState<{id: string; name: string}[]>([]);
+  const [bulkAccessSelectedId, setBulkAccessSelectedId] = useState<string>('');
+  const [bulkAccessType, setBulkAccessType] = useState<'course' | 'pathway'>('course');
+  const [bulkAccessLoading, setBulkAccessLoading] = useState(false);
   const [timeTick, setTimeTick] = useState(0);
   const [extensionDate, setExtensionDate] = useState<Date | undefined>(undefined);
   const [extensionPopoverOpen, setExtensionPopoverOpen] = useState<string | null>(null);
@@ -136,7 +152,7 @@ export function StudentsManagement() {
   }, [students]);
   useEffect(() => {
     filterStudents();
-  }, [students, searchTerm, lmsStatusFilter, feesStructureFilter, invoiceFilter, installmentPayments]);
+  }, [students, searchTerm, lmsStatusFilter, feesStructureFilter, invoiceFilter, totalFeeSort, feeRangeFrom, feeRangeTo, installmentPayments, joinDateRange]);
 
   // Re-render periodically so time-based invoice statuses update without refresh
   useEffect(() => {
@@ -323,6 +339,44 @@ export function StudentsManagement() {
         return true;
       });
     }
+
+    // Apply total fee amount range filter
+    const feeFrom = feeRangeFrom ? parseFloat(feeRangeFrom) : null;
+    const feeTo = feeRangeTo ? parseFloat(feeRangeTo) : null;
+    if (feeFrom !== null || feeTo !== null) {
+      filtered = filtered.filter(student => {
+        const key = String(student.student_record_id || '');
+        const payments = installmentPayments.get(key) || [];
+        const totalAmount = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+        if (feeFrom !== null && totalAmount < feeFrom) return false;
+        if (feeTo !== null && totalAmount > feeTo) return false;
+        return true;
+      });
+    }
+
+    // Apply total fee amount sort
+    if (totalFeeSort !== 'none') {
+      filtered = [...filtered].sort((a, b) => {
+        const keyA = String(a.student_record_id || '');
+        const keyB = String(b.student_record_id || '');
+        const paymentsA = installmentPayments.get(keyA) || [];
+        const paymentsB = installmentPayments.get(keyB) || [];
+        const totalA = paymentsA.reduce((sum, p) => sum + (p.amount || 0), 0);
+        const totalB = paymentsB.reduce((sum, p) => sum + (p.amount || 0), 0);
+        return totalFeeSort === 'low_to_high' ? totalA - totalB : totalB - totalA;
+      });
+    }
+
+    // Apply joining date range filter
+    if (joinDateRange.from) {
+      filtered = filtered.filter(student => new Date(student.created_at) >= joinDateRange.from!);
+    }
+    if (joinDateRange.to) {
+      const endOfDay = new Date(joinDateRange.to);
+      endOfDay.setHours(23, 59, 59, 999);
+      filtered = filtered.filter(student => new Date(student.created_at) <= endOfDay);
+    }
+
     setFilteredStudents(filtered);
   };
   const { deleteUser } = useUserManagement();
@@ -580,6 +634,60 @@ export function StudentsManagement() {
       toast({
         title: 'Error',
         description: error instanceof Error ? error.message : 'Failed to reset Success Partner credits',
+        variant: 'destructive'
+      });
+    }
+  };
+
+  const handleResetPassword = async (studentId: string, studentName: string, storedPassword: string, studentEmail?: string) => {
+    if (!storedPassword) {
+      toast({ title: 'Error', description: 'No stored password found for this student', variant: 'destructive' });
+      return;
+    }
+
+    try {
+      console.log('Resetting auth password for:', studentId);
+
+      // Attempt 1: dedicated admin-reset-password function
+      let result = await supabase.functions.invoke('admin-reset-password', {
+        body: { user_id: studentId, password: storedPassword }
+      });
+
+      // Attempt 2: if first failed, try reset-student-password
+      if (result.error || result.data?.error) {
+        console.log('admin-reset-password failed, trying reset-student-password...');
+        result = await supabase.functions.invoke('reset-student-password', {
+          body: { user_id: studentId, password: storedPassword }
+        });
+      }
+
+      // Attempt 3: if still failed, try update-student-details
+      if (result.error || result.data?.error) {
+        console.log('reset-student-password failed, trying update-student-details...');
+        result = await supabase.functions.invoke('update-student-details', {
+          body: {
+            user_id: studentId,
+            full_name: studentName,
+            email: studentEmail || '',
+            reset_password: storedPassword
+          }
+        });
+      }
+
+      console.log('Final reset response:', JSON.stringify(result.data));
+
+      if (result.error) throw result.error;
+      if (result.data?.error) throw new Error(result.data.error);
+
+      toast({
+        title: 'Password Reset',
+        description: `${studentName}'s authentication password has been reset successfully`,
+      });
+    } catch (error) {
+      console.error('All password reset attempts failed:', error);
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to reset password',
         variant: 'destructive'
       });
     }
@@ -1055,6 +1163,260 @@ export function StudentsManagement() {
       fetchStudents();
     }
   };
+
+  const handleBulkMarkInstallmentPaid = async (installmentNumber: number) => {
+    if (selectedStudents.size === 0) {
+      toast({ title: 'Error', description: 'Please select at least one student', variant: 'destructive' });
+      return;
+    }
+    try {
+      let successCount = 0;
+      let skipCount = 0;
+      for (const studentId of Array.from(selectedStudents)) {
+        const student = students.find(s => s.id === studentId);
+        if (!student?.student_record_id) { skipCount++; continue; }
+
+        const { data: invoiceRow } = await supabase
+          .from('invoices')
+          .select('id, status')
+          .eq('student_id', student.student_record_id)
+          .eq('installment_number', installmentNumber)
+          .maybeSingle();
+
+        if (invoiceRow?.status === 'paid') { skipCount++; continue; }
+
+        if (invoiceRow) {
+          await supabase.from('invoices').update({
+            status: 'paid',
+            paid_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          }).eq('id', invoiceRow.id);
+        } else {
+          await supabase.from('invoices').insert({
+            student_id: student.student_record_id,
+            installment_number: installmentNumber,
+            amount: 0,
+            status: 'paid',
+            due_date: new Date().toISOString(),
+            paid_at: new Date().toISOString()
+          });
+        }
+
+        // Activate LMS on first installment
+        if (installmentNumber === 1) {
+          await supabase.from('users').update({ lms_status: 'active' }).eq('id', studentId);
+        }
+        successCount++;
+      }
+      toast({
+        title: 'Success',
+        description: `Installment ${installmentNumber} marked paid for ${successCount} student(s)${skipCount > 0 ? `, ${skipCount} skipped` : ''}`
+      });
+      setSelectedStudents(new Set());
+      fetchInstallmentPayments();
+      fetchStudents();
+    } catch (error) {
+      console.error('Error bulk marking installments:', error);
+      toast({ title: 'Error', description: 'Failed to mark installments as paid', variant: 'destructive' });
+    }
+  };
+
+  const openBulkAccessDialog = async (action: 'grant' | 'revoke') => {
+    if (selectedStudents.size === 0) {
+      toast({ title: 'Error', description: 'Please select at least one student', variant: 'destructive' });
+      return;
+    }
+    setBulkAccessAction(action);
+    setBulkAccessSelectedId('');
+    setBulkAccessType('course');
+    // Fetch courses and pathways
+    const [coursesRes, pathwaysRes] = await Promise.all([
+      supabase.from('courses').select('id, title').eq('is_active', true).order('title'),
+      supabase.from('learning_pathways').select('id, name').eq('is_active', true).order('name')
+    ]);
+    setBulkAccessCourses(coursesRes.data || []);
+    setBulkAccessPathways(pathwaysRes.data || []);
+    setBulkAccessDialogOpen(true);
+  };
+
+  const handleBulkAccessConfirm = async () => {
+    if (!bulkAccessSelectedId) {
+      toast({ title: 'Error', description: 'Please select a course or pathway', variant: 'destructive' });
+      return;
+    }
+    setBulkAccessLoading(true);
+    try {
+      const selectedIds = Array.from(selectedStudents);
+      const chunkSize = 50;
+
+      if (bulkAccessAction === 'grant') {
+        // Get student records for selected users
+        for (let i = 0; i < selectedIds.length; i += chunkSize) {
+          const chunk = selectedIds.slice(i, i + chunkSize);
+          const { data: studentRecords } = await supabase
+            .from('students')
+            .select('id, user_id')
+            .in('user_id', chunk);
+
+          if (!studentRecords) continue;
+
+          for (const record of studentRecords) {
+            // Check if enrollment already exists
+            const query = supabase
+              .from('course_enrollments')
+              .select('id')
+              .eq('student_id', record.id);
+
+            if (bulkAccessType === 'course') {
+              query.eq('course_id', bulkAccessSelectedId).is('pathway_id', null);
+            } else {
+              query.eq('pathway_id', bulkAccessSelectedId);
+            }
+
+            const { data: existing } = await query.maybeSingle();
+            if (existing) continue; // Already enrolled
+
+            // Create enrollment
+            const enrollmentData: any = {
+              student_id: record.id,
+              status: 'active',
+              enrolled_at: new Date().toISOString(),
+            };
+            if (bulkAccessType === 'course') {
+              enrollmentData.course_id = bulkAccessSelectedId;
+            } else {
+              // For pathway, use first course in pathway as anchor
+              const { data: firstStep } = await supabase
+                .from('pathway_courses')
+                .select('course_id')
+                .eq('pathway_id', bulkAccessSelectedId)
+                .order('step_number', { ascending: true })
+                .limit(1)
+                .maybeSingle();
+              enrollmentData.course_id = firstStep?.course_id || bulkAccessSelectedId;
+              enrollmentData.pathway_id = bulkAccessSelectedId;
+            }
+            await supabase.from('course_enrollments').insert(enrollmentData);
+          }
+        }
+
+        // Also activate LMS
+        await supabase.from('users').update({ lms_status: 'active' }).in('id', selectedIds);
+        setStudents(prev => prev.map(s => (selectedStudents.has(s.id) ? { ...s, lms_status: 'active' } as Student : s)));
+
+        toast({ title: 'Success', description: `Access granted to ${selectedStudents.size} student(s)` });
+      } else {
+        // Revoke: cancel enrollments for the selected course/pathway
+        for (let i = 0; i < selectedIds.length; i += chunkSize) {
+          const chunk = selectedIds.slice(i, i + chunkSize);
+          const { data: studentRecords } = await supabase
+            .from('students')
+            .select('id')
+            .in('user_id', chunk);
+
+          if (!studentRecords) continue;
+          const studentRecordIds = studentRecords.map(r => r.id);
+
+          const query = supabase
+            .from('course_enrollments')
+            .update({ status: 'cancelled' })
+            .in('student_id', studentRecordIds);
+
+          if (bulkAccessType === 'course') {
+            query.eq('course_id', bulkAccessSelectedId);
+          } else {
+            query.eq('pathway_id', bulkAccessSelectedId);
+          }
+          await query;
+        }
+        toast({ title: 'Success', description: `Access revoked for ${selectedStudents.size} student(s)` });
+      }
+
+      setBulkAccessDialogOpen(false);
+      setSelectedStudents(new Set());
+      await fetchStudents();
+    } catch (error) {
+      console.error('Error updating course access:', error);
+      toast({ title: 'Error', description: 'Failed to update access', variant: 'destructive' });
+    } finally {
+      setBulkAccessLoading(false);
+    }
+  };
+
+  const handleBulkBatchAssign = async () => {
+    if (selectedStudents.size === 0) {
+      toast({ title: 'Error', description: 'Please select at least one student', variant: 'destructive' });
+      return;
+    }
+    setBulkBatchLoading(true);
+    try {
+      const selectedIds = Array.from(selectedStudents);
+      const batchValue = bulkBatchId === 'none' ? null : bulkBatchId;
+      let updatedCount = 0;
+
+      // Process in batches of 50 to avoid URL length limits
+      const chunkSize = 50;
+      for (let i = 0; i < selectedIds.length; i += chunkSize) {
+        const chunk = selectedIds.slice(i, i + chunkSize);
+        
+        const { data: studentRecords, error: recError } = await supabase
+          .from('students')
+          .select('id, user_id')
+          .in('user_id', chunk);
+
+        if (recError) {
+          console.error('Error fetching student records chunk:', recError);
+          continue;
+        }
+        if (!studentRecords || studentRecords.length === 0) continue;
+
+        for (const record of studentRecords) {
+          const { data: enrollment } = await supabase
+            .from('course_enrollments')
+            .select('id')
+            .eq('student_id', record.id)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          if (enrollment) {
+            const { error: updateError } = await supabase
+              .from('course_enrollments')
+              .update({ batch_id: batchValue, updated_at: new Date().toISOString() })
+              .eq('id', enrollment.id);
+            if (!updateError) updatedCount++;
+          }
+        }
+      }
+
+      toast({
+        title: 'Success',
+        description: `Batch updated for ${updatedCount} student(s)`
+      });
+      setBulkBatchDialogOpen(false);
+      setBulkBatchId('none');
+      setSelectedStudents(new Set());
+      await fetchStudents();
+    } catch (error) {
+      console.error('Error bulk assigning batch:', error);
+      toast({ title: 'Error', description: 'Failed to assign batch', variant: 'destructive' });
+    } finally {
+      setBulkBatchLoading(false);
+    }
+  };
+
+  const openBulkBatchDialog = async () => {
+    // Fetch active batches
+    const { data: batchesData } = await supabase
+      .from('batches')
+      .select('id, name, start_date')
+      .eq('status', 'active')
+      .order('created_at', { ascending: false });
+    setBulkBatches(batchesData || []);
+    setBulkBatchId('none');
+    setBulkBatchDialogOpen(true);
+  };
+
   const handleEditStudent = async (student: Student) => {
     setEditingStudent(student);
     setEditFormData({
@@ -1187,7 +1549,7 @@ export function StudentsManagement() {
         <span className="ml-2 text-muted-foreground">Loading students...</span>
       </div>;
   }
-  const hasActiveFilters = Boolean(searchTerm) || lmsStatusFilter !== 'all' || feesStructureFilter !== 'all' || invoiceFilter !== 'all';
+  const hasActiveFilters = Boolean(searchTerm) || lmsStatusFilter !== 'all' || feesStructureFilter !== 'all' || invoiceFilter !== 'all' || totalFeeSort !== 'none' || Boolean(feeRangeFrom) || Boolean(feeRangeTo) || Boolean(joinDateRange.from || joinDateRange.to);
   const displayStudents = hasActiveFilters ? filteredStudents : students;
   return <div className="flex-1 min-w-0 p-6 space-y-6 animate-fade-in overflow-x-hidden px-0 bg-transparent">
       <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-4">
@@ -1313,37 +1675,191 @@ export function StudentsManagement() {
             <SelectItem value="fees_cleared">Fees Cleared</SelectItem>
           </SelectContent>
         </Select>
+
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" className={cn("w-auto justify-start text-left font-normal h-10 text-sm", !(feeRangeFrom || feeRangeTo || totalFeeSort !== 'none') && "text-muted-foreground")}>
+              <DollarSign className="mr-2 h-4 w-4" />
+              {feeRangeFrom || feeRangeTo
+                ? `${feeRangeFrom || '0'} – ${feeRangeTo || '∞'}`
+                : totalFeeSort !== 'none'
+                  ? totalFeeSort === 'low_to_high' ? 'Low → High' : 'High → Low'
+                  : 'Fee Amount'}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-64 p-4 pointer-events-auto space-y-3" align="start" sideOffset={4}>
+            <p className="text-sm font-medium text-foreground">Fee Amount Range</p>
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                placeholder="From"
+                value={feeRangeFrom}
+                onChange={(e) => setFeeRangeFrom(e.target.value)}
+                className="h-9 text-sm"
+                min="0"
+              />
+              <span className="text-muted-foreground text-sm">–</span>
+              <Input
+                type="number"
+                placeholder="To"
+                value={feeRangeTo}
+                onChange={(e) => setFeeRangeTo(e.target.value)}
+                className="h-9 text-sm"
+                min="0"
+              />
+            </div>
+            <div className="border-t pt-2">
+              <p className="text-sm font-medium text-foreground mb-2">Sort</p>
+              <Select value={totalFeeSort} onValueChange={setTotalFeeSort}>
+                <SelectTrigger className="h-9 text-sm">
+                  <SelectValue placeholder="Sort order" />
+                </SelectTrigger>
+                <SelectContent className="bg-white z-50">
+                  <SelectItem value="none">No sorting</SelectItem>
+                  <SelectItem value="low_to_high">Lowest to Highest</SelectItem>
+                  <SelectItem value="high_to_low">Highest to Lowest</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full text-xs"
+              onClick={() => { setFeeRangeFrom(''); setFeeRangeTo(''); setTotalFeeSort('none'); }}
+            >
+              Clear
+            </Button>
+          </PopoverContent>
+        </Popover>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="outline" className={cn("w-auto justify-start text-left font-normal h-10 text-sm", !(joinDateRange.from || joinDateRange.to) && "text-muted-foreground")}>
+              <CalendarIcon className="mr-2 h-4 w-4" />
+              {joinDateRange.from && joinDateRange.to
+                ? `${format(joinDateRange.from, 'dd MMM')} – ${format(joinDateRange.to, 'dd MMM yyyy')}`
+                : joinDateRange.from
+                  ? `From ${format(joinDateRange.from, 'dd MMM yyyy')}`
+                  : 'Joining Date'}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-0 pointer-events-auto" align="start" sideOffset={4}>
+            <Calendar
+              mode="range"
+              defaultMonth={joinDateRange.from}
+              selected={joinDateRange.from ? { from: joinDateRange.from, to: joinDateRange.to } : undefined}
+              onSelect={(range: any) => {
+                if (!range) {
+                  setJoinDateRange({});
+                } else {
+                  setJoinDateRange({ from: range.from, to: range.to });
+                }
+              }}
+              disabled={(date) => date > new Date()}
+              numberOfMonths={1}
+              initialFocus
+              className="p-3 pointer-events-auto"
+            />
+            {(joinDateRange.from || joinDateRange.to) && (
+              <div className="p-3 pt-0">
+                <Button variant="ghost" size="sm" className="w-full text-xs" onClick={() => setJoinDateRange({})}>
+                  Clear dates
+                </Button>
+              </div>
+            )}
+          </PopoverContent>
+        </Popover>
       </div>
 
-      {/* Bulk Actions */}
-      {selectedStudents.size > 0 && <Card className="bg-blue-50 border-blue-200">
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-4">
-                <span className="text-sm font-medium text-blue-800">
-                  {selectedStudents.size} student(s) selected
-                </span>
-                <Button variant="outline" size="sm" onClick={() => setSelectedStudents(new Set())} className="text-blue-600 border-blue-300 hover:bg-blue-100">
-                  Clear Selection
-                </Button>
-              </div>
-              <div className="flex space-x-2">
-                <Button variant="outline" size="sm" onClick={() => handleBulkLMSAction('suspend')} className="text-red-600 border-red-300 hover:bg-red-50">
-                  <Ban className="w-4 h-4 mr-2" />
-                  Suspend LMS
-                </Button>
-                <Button variant="outline" size="sm" onClick={() => handleBulkLMSAction('activate')} className="text-green-600 border-green-300 hover:bg-green-50">
-                  <CheckCircle className="w-4 h-4 mr-2" />
-                  Activate LMS
-                </Button>
-                <Button variant="destructive" size="sm" onClick={handleBulkDelete} disabled={userManagementLoading} className="hover:bg-red-600">
-                  <Trash2 className="w-4 h-4 mr-2" />
-                  Delete Students
-                </Button>
-              </div>
+      {/* Bulk Actions - Sticky toolbar */}
+      {selectedStudents.size > 0 && (
+        <div className="sticky top-0 z-30 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border border-border rounded-lg shadow-lg p-3 sm:p-4 animate-fade-in">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            {/* Left: Selection info */}
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <Badge variant="secondary" className="bg-primary/10 text-primary font-semibold px-3 py-1 text-sm">
+                {selectedStudents.size} selected
+              </Badge>
+              <Button variant="ghost" size="sm" onClick={() => setSelectedStudents(new Set())} className="text-muted-foreground hover:text-foreground text-xs h-7">
+                Clear
+              </Button>
             </div>
-          </CardContent>
-        </Card>}
+
+            {/* Right: Action groups */}
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 w-full sm:w-auto">
+              {/* Mark Paid Dropdown */}
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="sm" className="h-8 text-xs sm:text-sm gap-1.5">
+                    <DollarSign className="w-3.5 h-3.5" />
+                    <span className="hidden xs:inline">Mark</span> Paid
+                    <ChevronDown className="w-3 h-3 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-44 p-1.5" align="end">
+                  <div className="flex flex-col gap-0.5">
+                    <Button variant="ghost" size="sm" className="justify-start text-sm h-9" onClick={() => handleBulkMarkInstallmentPaid(1)}>
+                      <DollarSign className="w-3.5 h-3.5 mr-2 text-emerald-600" />
+                      1st Installment
+                    </Button>
+                    <Button variant="ghost" size="sm" className="justify-start text-sm h-9" onClick={() => handleBulkMarkInstallmentPaid(2)}>
+                      <DollarSign className="w-3.5 h-3.5 mr-2 text-emerald-600" />
+                      2nd Installment
+                    </Button>
+                    <Button variant="ghost" size="sm" className="justify-start text-sm h-9" onClick={() => handleBulkMarkInstallmentPaid(3)}>
+                      <DollarSign className="w-3.5 h-3.5 mr-2 text-emerald-600" />
+                      3rd Installment
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+              {/* Course Access Dropdown */}
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="sm" className="h-8 text-xs sm:text-sm gap-1.5">
+                    <BookOpen className="w-3.5 h-3.5" />
+                    Access
+                    <ChevronDown className="w-3 h-3 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-44 p-1.5" align="end">
+                  <div className="flex flex-col gap-0.5">
+                    <Button variant="ghost" size="sm" className="justify-start text-sm h-9" onClick={() => openBulkAccessDialog('grant')}>
+                      <CheckCircle className="w-3.5 h-3.5 mr-2 text-green-600" />
+                      Grant Access
+                    </Button>
+                    <Button variant="ghost" size="sm" className="justify-start text-sm h-9" onClick={() => openBulkAccessDialog('revoke')}>
+                      <Ban className="w-3.5 h-3.5 mr-2 text-red-500" />
+                      Revoke Access
+                    </Button>
+                    <Button variant="ghost" size="sm" className="justify-start text-sm h-9" onClick={() => handleBulkLMSAction('activate')}>
+                      <CheckCircle className="w-3.5 h-3.5 mr-2 text-green-600" />
+                      Activate LMS
+                    </Button>
+                    <Button variant="ghost" size="sm" className="justify-start text-sm h-9" onClick={() => handleBulkLMSAction('suspend')}>
+                      <Ban className="w-3.5 h-3.5 mr-2 text-red-500" />
+                      Suspend LMS
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+              {/* Batch Assignment */}
+              <Button variant="outline" size="sm" className="h-8 text-xs sm:text-sm gap-1.5" onClick={openBulkBatchDialog}>
+                <Users className="w-3.5 h-3.5" />
+                <span className="hidden xs:inline">Assign</span> Batch
+              </Button>
+
+              {/* Delete - separated with divider */}
+              <div className="hidden sm:block w-px h-6 bg-border mx-1" />
+              <Button variant="outline" size="sm" className="h-8 text-xs sm:text-sm gap-1.5 text-destructive border-destructive/30 hover:bg-destructive/10" onClick={handleBulkDelete} disabled={userManagementLoading}>
+                <Trash2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Delete</span>
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Students Table */}
       <Card className="w-full animate-fade-in">
@@ -1652,9 +2168,37 @@ export function StudentsManagement() {
                                  className="hover-scale hover:border-yellow-300 hover:text-yellow-600"
                                >
                                  <RefreshCw className="w-4 h-4 mr-2" />
-                                 Reset SP Credits
-                               </Button>
-                               
+                                  Reset SP Credits
+                                </Button>
+
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <Button 
+                                      variant="outline" 
+                                      size="sm" 
+                                      className="hover-scale hover:border-blue-300 hover:text-blue-600"
+                                      disabled={!student.password_display}
+                                    >
+                                      <Key className="w-4 h-4 mr-2" />
+                                      Reset Password
+                                    </Button>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>Reset Password</AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        This will reset {student.full_name}'s login password to the original stored password ({student.password_display || 'N/A'}). The student will need to use this password to log in.
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                      <AlertDialogAction onClick={() => handleResetPassword(student.id, student.full_name, student.password_display, student.email)}>
+                                        Reset Password
+                                      </AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                                
                                <AlertDialog>
                                  <AlertDialogTrigger asChild>
                                    <Button variant="outline" size="sm" className="hover-scale text-red-600 hover:text-red-700 hover:border-red-300">
@@ -2024,5 +2568,103 @@ export function StudentsManagement() {
           onAccessUpdated={fetchStudents}
         />
       )}
+
+      {/* Bulk Batch Assignment Dialog */}
+      <Dialog open={bulkBatchDialogOpen} onOpenChange={setBulkBatchDialogOpen}>
+        <DialogContent className="bg-white">
+          <DialogHeader>
+            <DialogTitle>Assign Batch to {selectedStudents.size} Student(s)</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label>Select Batch</Label>
+              <Select value={bulkBatchId} onValueChange={setBulkBatchId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a batch" />
+                </SelectTrigger>
+                <SelectContent className="bg-white z-50">
+                  <SelectItem value="none">No Batch</SelectItem>
+                  {bulkBatches.map((batch) => (
+                    <SelectItem key={batch.id} value={batch.id}>
+                      {batch.name} (Start: {new Date(batch.start_date).toLocaleDateString()})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setBulkBatchDialogOpen(false)} disabled={bulkBatchLoading}>Cancel</Button>
+              <Button onClick={handleBulkBatchAssign} disabled={bulkBatchLoading}>
+                {bulkBatchLoading ? 'Assigning...' : 'Assign Batch'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Access Grant/Revoke Dialog */}
+      <Dialog open={bulkAccessDialogOpen} onOpenChange={setBulkAccessDialogOpen}>
+        <DialogContent className="bg-white sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {bulkAccessAction === 'grant' ? 'Grant' : 'Revoke'} Access for {selectedStudents.size} Student(s)
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="flex gap-2">
+              <Button
+                variant={bulkAccessType === 'course' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => { setBulkAccessType('course'); setBulkAccessSelectedId(''); }}
+              >
+                <BookOpen className="w-4 h-4 mr-1" />
+                Course
+              </Button>
+              <Button
+                variant={bulkAccessType === 'pathway' ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => { setBulkAccessType('pathway'); setBulkAccessSelectedId(''); }}
+              >
+                <Activity className="w-4 h-4 mr-1" />
+                Pathway
+              </Button>
+            </div>
+            <div>
+              <Label className="text-sm font-medium">
+                Select {bulkAccessType === 'course' ? 'Course' : 'Pathway'}
+              </Label>
+              <Select value={bulkAccessSelectedId} onValueChange={setBulkAccessSelectedId}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue placeholder={`Choose a ${bulkAccessType}...`} />
+                </SelectTrigger>
+                <SelectContent className="bg-white z-50">
+                  {bulkAccessType === 'course'
+                    ? bulkAccessCourses.map(c => (
+                        <SelectItem key={c.id} value={c.id}>{c.title}</SelectItem>
+                      ))
+                    : bulkAccessPathways.map(p => (
+                        <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                      ))
+                  }
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setBulkAccessDialogOpen(false)} disabled={bulkAccessLoading}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleBulkAccessConfirm}
+                disabled={bulkAccessLoading || !bulkAccessSelectedId}
+                variant={bulkAccessAction === 'revoke' ? 'destructive' : 'default'}
+              >
+                {bulkAccessLoading
+                  ? (bulkAccessAction === 'grant' ? 'Granting...' : 'Revoking...')
+                  : (bulkAccessAction === 'grant' ? 'Grant Access' : 'Revoke Access')}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>;
 }
